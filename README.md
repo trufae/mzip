@@ -16,6 +16,7 @@ The implementation consists of two main parts:
 
 1. `mzip.c` - Minimalistic libzip subset replacement
 2. `deflate.c` - Minimalistic deflate (RFC 1951) implementation compatible with zlib API
+3. `zstd.c` - Minimalistic zstd implementation
 
 ## Building
 

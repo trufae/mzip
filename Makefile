@@ -4,9 +4,9 @@ CC ?= gcc
 CFLAGS ?= -O2 -Wall
 
 # Default compression algorithms to enable
-COMPRESSION_FLAGS = -DMZIP_IMPLEMENTATION \
-                     -DMZIP_ENABLE_STORE \
-                     -DMZIP_ENABLE_DEFLATE
+#COMPRESSION_FLAGS = -DMZIP_IMPLEMENTATION \
+#                     -DMZIP_ENABLE_STORE \
+#                     -DMZIP_ENABLE_DEFLATE
 
 # Uncomment to enable additional compression algorithms
 #COMPRESSION_FLAGS += -DMZIP_ENABLE_ZSTD -DMZSTD_IMPLEMENTATION
@@ -21,8 +21,8 @@ LIBS = -lz
 # Main targets
 all: mzip
 
-mzip: main.c mzip.h config.h
-	$(CC) $(CFLAGS) $(COMPRESSION_FLAGS) -o $@ main.c $(LIBS)
+mzip: main.c config.h
+	$(CC) $(CFLAGS) $(COMPRESSION_FLAGS) -o $@ main.c mzip.c $(LIBS)
 
 # Enable all supported compression methods
 all-compression: COMPRESSION_FLAGS += -DMZIP_ENABLE_ZSTD -DMZSTD_IMPLEMENTATION
