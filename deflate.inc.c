@@ -142,12 +142,174 @@ typedef struct {
 
 /* Internal state for deflate */
 typedef struct {
-	/* Simple state for now - we'll expand this later */
+	/* Compression parameters */
 	int level;              /* Compression level */
 	int is_last_block;      /* Is this the final block? */
+
+	/* Sliding window for LZ77 */
+	uint8_t *window;        /* Sliding window buffer */
+	uint32_t window_size;   /* Window size (power of 2) */
+	uint32_t window_mask;   /* Window mask (window_size - 1) */
+	uint32_t window_pos;    /* Current position in window */
+
+	/* Hash table for fast string matching */
+	uint16_t *hash_table;   /* Hash table for finding matches */
+	uint32_t hash_size;     /* Size of hash table */
+	uint32_t hash_mask;     /* Hash mask (hash_size - 1) */
+
+	/* Output state */
+	uint32_t bit_buffer;     /* Bit buffer */
+	uint32_t bits_in_buffer; /* Number of bits in buffer */
+
+	/* Huffman tables */
+	huffman_table literals;  /* Literal/length codes */
+	huffman_table distances; /* Distance codes */
 } deflate_state;
 
 /* ----------- Utility Functions ----------- */
+
+/* Calculate hash for LZ77 */
+static uint32_t calculate_hash(const uint8_t *data) {
+	return ((uint32_t)data[0] << 16) | ((uint32_t)data[1] << 8) | data[2];
+}
+
+/* Find longest match at current position */
+static int find_longest_match(deflate_state *state, const uint8_t *data,
+		uint32_t pos, uint32_t max_len, uint32_t *match_pos) {
+	/* Need at least 3 bytes for a match */
+	if (max_len < 3) return 0;
+
+	/* Calculate hash for current position */
+	uint32_t hash = calculate_hash(data) & state->hash_mask;
+
+	/* Get position of potential match from hash table */
+	uint32_t chain_pos = state->hash_table[hash];
+
+	/* Store current position in hash table (save position modulo 64K) */
+	state->hash_table[hash] = (uint16_t)(pos & 0xFFFF);
+
+	/* No previous match at this hash */
+	if (chain_pos == 0) return 0;
+
+	/* Don't look back too far */
+	const uint32_t max_dist = 32768;
+	if (pos > chain_pos + max_dist) return 0;
+
+	/* Find longest match */
+	uint32_t best_len = 0;
+	*match_pos = 0;
+
+	/* Limit match search for better performance */
+	const int max_chain_length = (state->level >= 8) ? 4096 :
+		(state->level >= 5) ? 512 :
+		(state->level >= 3) ? 128 : 32;
+
+	int chain_len = max_chain_length;
+
+	/* Search for matches */
+	while (chain_pos > 0 && chain_len-- > 0) {
+		/* Quick check for 3-byte match at start */
+		if (data[0] == data[pos - chain_pos] &&
+				data[1] == data[pos - chain_pos + 1] &&
+				data[2] == data[pos - chain_pos + 2]) {
+
+			/* Count matching bytes */
+			uint32_t len = 3;
+			while (len < max_len && data[len] == data[pos - chain_pos + len]) {
+				len++;
+			}
+
+			/* Update best match if better */
+			if (len > best_len) {
+				best_len = len;
+				*match_pos = chain_pos;
+
+				/* Stop if we found a "good enough" match */
+				if (len >= max_len) break;
+			}
+		}
+
+		/* In a full implementation we'd use a proper chain, but for simplicity
+		 * we'll just terminate the search as the code is intended to be minimal */
+		break; /* End the chain search after first match */
+	}
+
+	return best_len;
+}
+
+/* Write bits to output buffer */
+static int write_bits(z_stream *strm, deflate_state *state,
+		uint32_t bits, int num_bits) {
+	/* Add bits to buffer */
+	state->bit_buffer |= (bits << state->bits_in_buffer);
+	state->bits_in_buffer += num_bits;
+
+	/* Write out full bytes */
+	while (state->bits_in_buffer >= 8) {
+		if (strm->avail_out == 0) return Z_BUF_ERROR;
+
+		*strm->next_out++ = state->bit_buffer & 0xFF;
+		strm->avail_out--;
+		strm->total_out++;
+
+		state->bit_buffer >>= 8;
+		state->bits_in_buffer -= 8;
+	}
+
+	return Z_OK;
+}
+
+/* Flush remaining bits in buffer */
+static int flush_bits(z_stream *strm, deflate_state *state) {
+	/* Flush any remaining bits */
+	if (state->bits_in_buffer > 0) {
+		if (strm->avail_out == 0) return Z_BUF_ERROR;
+
+		*strm->next_out++ = state->bit_buffer & 0xFF;
+		strm->avail_out--;
+		strm->total_out++;
+
+		state->bit_buffer = 0;
+		state->bits_in_buffer = 0;
+	}
+
+	return Z_OK;
+}
+
+/* Initialize static Huffman tables for deflate */
+static void init_fixed_huffman_deflate(deflate_state *state) {
+	/* Same tables as used in inflate */
+	for (int i = 0; i < 144; i++) {
+		state->literals.codes[i] = 0x30 + i; /* 8 bits, 00110000 + i */
+		state->literals.lengths[i] = 8;
+	}
+	for (int i = 144; i < 256; i++) {
+		state->literals.codes[i] = 0x190 + (i - 144); /* 9 bits, 110010000 + (i - 144) */
+		state->literals.lengths[i] = 9;
+	}
+	for (int i = 256; i < 280; i++) {
+		state->literals.codes[i] = 0 + (i - 256); /* 7 bits, 0000000 + (i - 256) */
+		state->literals.lengths[i] = 7;
+	}
+	for (int i = 280; i < 288; i++) {
+		state->literals.codes[i] = 0xC0 + (i - 280); /* 8 bits, 11000000 + (i - 280) */
+		state->literals.lengths[i] = 8;
+	}
+	state->literals.count = 288;
+
+	/* Distance codes */
+	for (int i = 0; i < 32; i++) {
+		state->distances.codes[i] = i; /* 5 bits */
+		state->distances.lengths[i] = 5;
+	}
+	state->distances.count = 32;
+}
+
+/* Write a Huffman code to output */
+static int write_huffman_code(z_stream *strm, deflate_state *state,
+		uint16_t code, uint8_t code_length) {
+	return write_bits(strm, state, code, code_length);
+}
 
 /* Get a bit from the input stream */
 static int get_bit(z_stream *strm, inflate_state *state) {
@@ -170,17 +332,15 @@ static int get_bit(z_stream *strm, inflate_state *state) {
 }
 
 /* Get n bits from the input stream (right-aligned) */
-static int get_bits(z_stream *strm, inflate_state *state, int n) {
-	int result = 0;
-
-	for (int i = 0; i < n; i++) {
+static int get_bits (z_stream *strm, inflate_state *state, int n) {
+	int i, result = 0;
+	for (i = 0; i < n; i++) {
 		int bit = get_bit(strm, state);
 		if (bit < 0) {
 			return -1; /* Error - not enough input */
 		}
 		result |= (bit << i);
 	}
-
 	return result;
 }
 
@@ -274,14 +434,17 @@ int inflateInit2_(z_stream *strm, int windowBits, const char *version, int strea
 }
 
 int inflateInit2(z_stream *strm, int windowBits) {
-	if (!strm) return Z_STREAM_ERROR;
-
+	if (!strm) {
+		return Z_STREAM_ERROR;
+	}
 	/* Handle windowBits - negative means no header */
 	int window_size = 1 << ((windowBits < 0) ? -windowBits : windowBits);
 
 	/* Allocate state */
 	inflate_state *state = (inflate_state *)calloc(1, sizeof(inflate_state));
-	if (!state) return Z_MEM_ERROR;
+	if (!state) {
+		return Z_MEM_ERROR;
+	}
 
 	/* Allocate window buffer */
 	state->window = (uint8_t *)malloc(window_size);
@@ -306,8 +469,9 @@ int inflateInit2(z_stream *strm, int windowBits) {
 }
 
 int inflate(z_stream *strm, int flush) {
-	if (!strm || !strm->state) return Z_STREAM_ERROR;
-
+	if (!strm || !strm->state) {
+		return Z_STREAM_ERROR;
+	}
 	inflate_state *state = (inflate_state *)strm->state;
 	int ret = Z_OK;
 
@@ -317,12 +481,15 @@ int inflate(z_stream *strm, int flush) {
 		switch (state->state) {
 		case 0: /* Block header */
 			/* Read block header */
-			state->final_block = get_bit(strm, state);
-			if (state->final_block < 0) return Z_DATA_ERROR;
-
+			state->final_block = get_bit (strm, state);
+			if (state->final_block < 0) {
+				return Z_DATA_ERROR;
+			}
 			/* Get block type */
-			state->btype = (block_type)get_bits(strm, state, 2);
-			if (state->btype < 0) return Z_DATA_ERROR;
+			state->btype = (block_type)get_bits (strm, state, 2);
+			if (state->btype < 0) {
+				return Z_DATA_ERROR;
+			}
 
 			/* Move to block data state */
 			state->state = 1;
@@ -333,7 +500,9 @@ int inflate(z_stream *strm, int flush) {
 			switch (state->btype) {
 			case BLOCK_UNCOMPRESSED:
 				ret = read_uncompressed_block(strm, state);
-				if (ret != Z_OK) return ret;
+				if (ret != Z_OK) {
+					return ret;
+				}
 				/* Move to next block header */
 				state->state = 0;
 				break;
@@ -364,33 +533,44 @@ int inflate(z_stream *strm, int flush) {
 				/* For fixed Huffman, we know the bit patterns */
 				if (get_bit(strm, state) == 0) {
 					/* 0xxx xxxx - 8 bit code for values 0-143 */
-					code = get_bits(strm, state, 7);
-					if (code < 0) return Z_DATA_ERROR;
+					code = get_bits (strm, state, 7);
+					if (code < 0) {
+						return Z_DATA_ERROR;
+					}
 					code = (0 << 7) | code; /* Add the 0 bit we already read */
 				} else {
-					int next_bit = get_bit(strm, state);
-					if (next_bit < 0) return Z_DATA_ERROR;
-
+					int next_bit = get_bit (strm, state);
+					if (next_bit < 0) {
+						return Z_DATA_ERROR;
+					}
 					if (next_bit == 0) {
 						/* 10xx xxxx - 8 bit code for values 144-255 */
-						code = get_bits(strm, state, 6);
-						if (code < 0) return Z_DATA_ERROR;
+						code = get_bits (strm, state, 6);
+						if (code < 0) {
+							return Z_DATA_ERROR;
+						}
 						code = (0b10 << 6) | code; /* Add the 10 bits we already read */
 						code += 144; /* Adjust to actual value */
 					} else {
 						int third_bit = get_bit(strm, state);
-						if (third_bit < 0) return Z_DATA_ERROR;
+						if (third_bit < 0) {
+							return Z_DATA_ERROR;
+						}
 
 						if (third_bit == 0) {
 							/* 110x xxxx - 7 bit code for values 256-279 */
-							code = get_bits(strm, state, 4);
-							if (code < 0) return Z_DATA_ERROR;
+							code = get_bits (strm, state, 4);
+							if (code < 0) {
+								return Z_DATA_ERROR;
+							}
 							code = (0b110 << 4) | code; /* Add the 110 bits we already read */
 							code = code - (0b110 << 4) + 256; /* Adjust to actual value */
 						} else {
 							/* 111x xxxx - 8 bit code for values 280-287 */
-							code = get_bits(strm, state, 4);
-							if (code < 0) return Z_DATA_ERROR;
+							code = get_bits (strm, state, 4);
+							if (code < 0) {
+								return Z_DATA_ERROR;
+							}
 							code = (0b111 << 4) | code; /* Add the 111 bits we already read */
 							code = code - (0b111 << 4) + 280; /* Adjust to actual value */
 						}
@@ -432,15 +612,18 @@ int inflate(z_stream *strm, int flush) {
 					int extra_bits = length_extra[length_idx];
 
 					if (extra_bits > 0) {
-						int extra = get_bits(strm, state, extra_bits);
-						if (extra < 0) return Z_DATA_ERROR;
+						int extra = get_bits (strm, state, extra_bits);
+						if (extra < 0) {
+							return Z_DATA_ERROR;
+						}
 						length += extra;
 					}
 
 					/* Now read distance code - for fixed Huffman this is always 5 bits */
-					int distance_code = get_bits(strm, state, 5);
-					if (distance_code < 0) return Z_DATA_ERROR;
-
+					int distance_code = get_bits (strm, state, 5);
+					if (distance_code < 0) {
+						return Z_DATA_ERROR;
+					}
 					/* Convert to actual distance */
 					static const uint16_t dist_base[] = {
 						1, 2, 3, 4, 5, 7, 9, 13, 17, 25,
@@ -459,8 +642,10 @@ int inflate(z_stream *strm, int flush) {
 					int dist_extra_bits = dist_extra[distance_code];
 
 					if (dist_extra_bits > 0) {
-						int extra = get_bits(strm, state, dist_extra_bits);
-						if (extra < 0) return Z_DATA_ERROR;
+						int extra = get_bits (strm, state, dist_extra_bits);
+						if (extra < 0) {
+							return Z_DATA_ERROR;
+						}
 						distance += extra;
 					}
 
@@ -519,21 +704,18 @@ int inflate(z_stream *strm, int flush) {
 }
 
 int inflateEnd(z_stream *strm) {
-	if (!strm || !strm->state) return Z_STREAM_ERROR;
-
+	if (!strm || !strm->state) {
+		return Z_STREAM_ERROR;
+	}
 	inflate_state *state = (inflate_state *)strm->state;
-
-	/* Free window buffer */
-	free(state->window);
-
-	/* Free state */
-	free(state);
+	free (state->window);
+	free (state);
 	strm->state = NULL;
 
 	return Z_OK;
 }
 
-/* 
+/*
  * Simplified deflate implementation - just stores data uncompressed
  * for now. A complete implementation would use LZ77 + Huffman coding.
  */
@@ -548,15 +730,54 @@ int deflateInit2_(z_stream *strm, int level, int method, int windowBits,
 
 int deflateInit2(z_stream *strm, int level, int method, int windowBits,
 		int memLevel, int strategy) {
-	if (!strm) return Z_STREAM_ERROR;
+	if (!strm) {
+		return Z_STREAM_ERROR;
+	}
+
+	/* Validate parameters */
+	if (windowBits < 8 || windowBits > 15) {
+		return Z_STREAM_ERROR;
+	}
+
+	/* Normalize compression level */
+	if (level == Z_DEFAULT_COMPRESSION) level = 6;
 
 	/* Allocate state */
 	deflate_state *state = (deflate_state *)calloc(1, sizeof(deflate_state));
-	if (!state) return Z_MEM_ERROR;
+	if (!state) {
+		return Z_MEM_ERROR;
+	}
+
+	/* Calculate window size (2^windowBits) */
+	state->window_size = 1 << windowBits;
+	state->window_mask = state->window_size - 1;
+
+	/* Allocate sliding window */
+	state->window = (uint8_t *)malloc(state->window_size);
+	if (!state->window) {
+		free(state);
+		return Z_MEM_ERROR;
+	}
+
+	/* Allocate hash table - size depends on window size */
+	state->hash_size = 1 << (windowBits - 3); /* Smaller than window for memory efficiency */
+	state->hash_mask = state->hash_size - 1;
+	state->hash_table = (uint16_t *)calloc(state->hash_size, sizeof(uint16_t));
+	if (!state->hash_table) {
+		free(state->window);
+		free(state);
+		return Z_MEM_ERROR;
+	}
 
 	/* Initialize state */
 	state->level = level;
 	state->is_last_block = 0;
+	state->window_pos = 0;
+	state->bit_buffer = 0;
+	state->bits_in_buffer = 0;
+
+	/* Initialize Huffman tables */
+	init_fixed_huffman_deflate(state);
 
 	strm->state = state;
 	strm->total_in = 0;
@@ -566,8 +787,9 @@ int deflateInit2(z_stream *strm, int level, int method, int windowBits,
 }
 
 int deflate(z_stream *strm, int flush) {
-	if (!strm || !strm->state) return Z_STREAM_ERROR;
-
+	if (!strm || !strm->state) {
+		return Z_STREAM_ERROR;
+	}
 	deflate_state *state = (deflate_state *)strm->state;
 
 	/* Check if this is the final block */
@@ -575,52 +797,284 @@ int deflate(z_stream *strm, int flush) {
 		state->is_last_block = 1;
 	}
 
-	/* Simple implementation - just store data uncompressed */
-	if (strm->avail_in > 0) {
-		/* Calculate block header size - 3 bits for header + padding to byte boundary */
-		uint32_t header_size = 3;
-		if (header_size % 8 != 0) {
-			header_size = ((header_size / 8) + 1) * 8; /* Round up to next byte */
-		}
-		header_size = header_size / 8; /* Convert to bytes */
+	/* If no compression wanted or very small level, just store uncompressed */
+	if (state->level == Z_NO_COMPRESSION) {
+		if (strm->avail_in > 0) {
+			/* Calculate block header size - 3 bits for header + padding to byte boundary */
+			uint32_t header_size = 3;
+			if (header_size % 8 != 0) {
+				header_size = ((header_size / 8) + 1) * 8; /* Round up to next byte */
+			}
+			header_size = header_size / 8; /* Convert to bytes */
 
-		/* Calculate block size - header + length fields + data */
-		uint32_t block_size = header_size + 4 + strm->avail_in;
+			/* Calculate block size - header + length fields + data */
+			uint32_t block_size = header_size + 4 + strm->avail_in;
 
-		/* Check if we have enough output space */
-		if (strm->avail_out < block_size) {
-			return Z_BUF_ERROR;
-		}
+			/* Check if we have enough output space */
+			if (strm->avail_out < block_size) {
+				return Z_BUF_ERROR;
+			}
 
-		/* Write block header - type 00 (uncompressed) */
-		*strm->next_out++ = state->is_last_block ? 1 : 0; /* Final block bit + type 00 */
-		strm->avail_out--;
-		strm->total_out++;
-
-		/* Pad to byte boundary if needed */
-		for (uint32_t i = 1; i < header_size; i++) {
-			*strm->next_out++ = 0;
+			/* Write block header - type 00 (uncompressed) */
+			*strm->next_out++ = state->is_last_block ? 1 : 0; /* Final block bit + type 00 */
 			strm->avail_out--;
 			strm->total_out++;
+
+			/* Pad to byte boundary if needed */
+			for (uint32_t i = 1; i < header_size; i++) {
+				*strm->next_out++ = 0;
+				strm->avail_out--;
+				strm->total_out++;
+			}
+
+			/* Write length and inverted length */
+			uint16_t len = strm->avail_in > 0xFFFF ? 0xFFFF : strm->avail_in;
+			*strm->next_out++ = len & 0xFF;
+			*strm->next_out++ = (len >> 8) & 0xFF;
+			*strm->next_out++ = (~len) & 0xFF;
+			*strm->next_out++ = ((~len) >> 8) & 0xFF;
+			strm->avail_out -= 4;
+			strm->total_out += 4;
+
+			/* Write data */
+			memcpy(strm->next_out, strm->next_in, len);
+			strm->next_in += len;
+			strm->avail_in -= len;
+			strm->total_in += len;
+			strm->next_out += len;
+			strm->avail_out -= len;
+			strm->total_out += len;
+		}
+		return flush == Z_FINISH ? Z_STREAM_END : Z_OK;
+	}
+
+	/* Use fixed Huffman codes for simplicity */
+	if (strm->avail_in > 0) {
+		/* Write block header - type 01 (fixed Huffman) */
+		int ret = write_bits(strm, state, state->is_last_block ? 1 : 0, 1); /* Final block bit */
+		if (ret != Z_OK) return ret;
+
+		ret = write_bits(strm, state, 1, 2); /* Block type 01 */
+		if (ret != Z_OK) return ret;
+
+		/* Process all input data */
+		while (strm->avail_in > 0) {
+			/* Ensure we have output space for a worst-case symbol */
+			if (strm->avail_out < 4) { /* Conservative estimate */
+				return Z_BUF_ERROR;
+			}
+
+			/* Look for a match */
+			uint32_t match_pos = 0;
+			uint32_t max_look_ahead = strm->avail_in > 258 ? 258 : strm->avail_in;
+			uint32_t match_len = 0;
+
+			/* Skip match search for level < 3 or not enough data */
+			if (state->level >= 3 && max_look_ahead >= 3) {
+				match_len = find_longest_match(state, strm->next_in, state->window_pos,
+						max_look_ahead, &match_pos);
+			}
+
+			if (match_len >= 3) {
+				/* Encode length/distance pair */
+
+				/* Determine length code */
+				uint16_t length_code;
+				uint8_t extra_bits;
+
+				if (match_len <= 10) {
+					length_code = 257 + (match_len - 3);
+					extra_bits = 0;
+				} else if (match_len <= 18) {
+					length_code = 265 + ((match_len - 11) / 2);
+					extra_bits = 1;
+				} else if (match_len <= 34) {
+					length_code = 269 + ((match_len - 19) / 4);
+					extra_bits = 2;
+				} else if (match_len <= 66) {
+					length_code = 273 + ((match_len - 35) / 8);
+					extra_bits = 3;
+				} else if (match_len <= 130) {
+					length_code = 277 + ((match_len - 67) / 16);
+					extra_bits = 4;
+				} else {
+					length_code = 281 + ((match_len - 131) / 32);
+					extra_bits = 5;
+				}
+
+				/* Write length code */
+				write_huffman_code (strm, state,
+						state->literals.codes[length_code],
+						state->literals.lengths[length_code]);
+
+				/* Write extra bits for length if needed */
+				if (extra_bits > 0) {
+					int extra_value = 0;
+					switch (extra_bits) {
+					case 1:
+						extra_value = (match_len - 11) % 2;
+						break;
+					case 2:
+						extra_value = (match_len - 19) % 4;
+						break;
+					case 3:
+						extra_value = (match_len - 35) % 8;
+						break;
+					case 4:
+						extra_value = (match_len - 67) % 16;
+						break;
+					case 5:
+						extra_value = (match_len - 131) % 32;
+						break;
+					}
+					write_bits(strm, state, extra_value, extra_bits);
+				}
+
+				/* Calculate distance */
+				uint32_t distance = state->window_pos - match_pos;
+
+				/* Determine distance code */
+				uint16_t distance_code;
+				uint8_t dist_extra_bits;
+
+				if (distance <= 4) {
+					distance_code = distance - 1;
+					dist_extra_bits = 0;
+				} else if (distance <= 8) {
+					distance_code = 4 + ((distance - 5) / 2);
+					dist_extra_bits = 1;
+				} else if (distance <= 16) {
+					distance_code = 6 + ((distance - 9) / 4);
+					dist_extra_bits = 2;
+				} else if (distance <= 32) {
+					distance_code = 8 + ((distance - 17) / 8);
+					dist_extra_bits = 3;
+				} else if (distance <= 64) {
+					distance_code = 10 + ((distance - 33) / 16);
+					dist_extra_bits = 4;
+				} else if (distance <= 128) {
+					distance_code = 12 + ((distance - 65) / 32);
+					dist_extra_bits = 5;
+				} else if (distance <= 256) {
+					distance_code = 14 + ((distance - 129) / 64);
+					dist_extra_bits = 6;
+				} else if (distance <= 512) {
+					distance_code = 16 + ((distance - 257) / 128);
+					dist_extra_bits = 7;
+				} else if (distance <= 1024) {
+					distance_code = 18 + ((distance - 513) / 256);
+					dist_extra_bits = 8;
+				} else if (distance <= 2048) {
+					distance_code = 20 + ((distance - 1025) / 512);
+					dist_extra_bits = 9;
+				} else if (distance <= 4096) {
+					distance_code = 22 + ((distance - 2049) / 1024);
+					dist_extra_bits = 10;
+				} else if (distance <= 8192) {
+					distance_code = 24 + ((distance - 4097) / 2048);
+					dist_extra_bits = 11;
+				} else if (distance <= 16384) {
+					distance_code = 26 + ((distance - 8193) / 4096);
+					dist_extra_bits = 12;
+				} else {
+					distance_code = 28 + ((distance - 16385) / 8192);
+					dist_extra_bits = 13;
+				}
+
+				/* Write distance code */
+				write_huffman_code (strm, state,
+						state->distances.codes[distance_code],
+						state->distances.lengths[distance_code]);
+
+				/* Write extra bits for distance if needed */
+				if (dist_extra_bits > 0) {
+					int extra_value = 0;
+					switch (dist_extra_bits) {
+					case 1:
+						extra_value = (distance - 5) % 2;
+						break;
+					case 2:
+						extra_value = (distance - 9) % 4;
+						break;
+					case 3:
+						extra_value = (distance - 17) % 8;
+						break;
+					case 4:
+						extra_value = (distance - 33) % 16;
+						break;
+					case 5:
+						extra_value = (distance - 65) % 32;
+						break;
+					case 6:
+						extra_value = (distance - 129) % 64;
+						break;
+					case 7:
+						extra_value = (distance - 257) % 128;
+						break;
+					case 8:
+						extra_value = (distance - 513) % 256;
+						break;
+					case 9:
+						extra_value = (distance - 1025) % 512;
+						break;
+					case 10:
+						extra_value = (distance - 2049) % 1024;
+						break;
+					case 11:
+						extra_value = (distance - 4097) % 2048;
+						break;
+					case 12:
+						extra_value = (distance - 8193) % 4096;
+						break;
+					case 13:
+						extra_value = (distance - 16385) % 8192;
+						break;
+					}
+					write_bits(strm, state, extra_value, dist_extra_bits);
+				}
+
+				/* Update input position and window */
+				for (uint32_t i = 0; i < match_len; i++) {
+					/* Add to sliding window */
+					state->window[state->window_pos] = *strm->next_in;
+					state->window_pos = (state->window_pos + 1) & state->window_mask;
+
+					/* Update input position */
+					strm->next_in++;
+					strm->avail_in--;
+					strm->total_in++;
+
+					/* If we've used all input, we're done */
+					if (strm->avail_in == 0) break;
+				}
+			} else {
+				/* No match, output literal */
+				uint8_t literal = *strm->next_in;
+
+				/* Write literal code */
+				write_huffman_code(strm, state,
+						state->literals.codes[literal],
+						state->literals.lengths[literal]);
+
+				/* Update input position and window */
+				state->window[state->window_pos] = literal;
+				state->window_pos = (state->window_pos + 1) & state->window_mask;
+
+				strm->next_in++;
+				strm->avail_in--;
+				strm->total_in++;
+			}
 		}
 
-		/* Write length and inverted length */
-		uint16_t len = strm->avail_in > 0xFFFF ? 0xFFFF : strm->avail_in;
-		*strm->next_out++ = len & 0xFF;
-		*strm->next_out++ = (len >> 8) & 0xFF;
-		*strm->next_out++ = (~len) & 0xFF;
-		*strm->next_out++ = ((~len) >> 8) & 0xFF;
-		strm->avail_out -= 4;
-		strm->total_out += 4;
-
-		/* Write data */
-		memcpy(strm->next_out, strm->next_in, len);
-		strm->next_in += len;
-		strm->avail_in -= len;
-		strm->total_in += len;
-		strm->next_out += len;
-		strm->avail_out -= len;
-		strm->total_out += len;
+		/* If this is the end of stream, write end of block marker */
+		if (flush == Z_FINISH) {
+			/* Write end of block symbol (256) */
+			write_huffman_code (strm, state,
+					state->literals.codes[256],
+					state->literals.lengths[256]);
+			/* Flush remaining bits */
+			flush_bits (strm, state);
+		}
 	}
 
 	return flush == Z_FINISH ? Z_STREAM_END : Z_OK;
@@ -630,7 +1084,14 @@ int deflateEnd(z_stream *strm) {
 	if (!strm || !strm->state) {
 		return Z_STREAM_ERROR;
 	}
-	free (strm->state);
+
+	deflate_state *state = (deflate_state *)strm->state;
+
+	/* Free all allocated memory */
+	free (state->window);
+	free (state->hash_table);
+	free (state);
+
 	strm->state = NULL;
 	return Z_OK;
 }
