@@ -244,7 +244,7 @@ static int write_bits(z_stream *strm, deflate_state *state,
 	state->bit_buffer |= (bits << state->bits_in_buffer);
 	state->bits_in_buffer += num_bits;
 
-	/* Write out full bytes */
+	/* Fast path: write all full bytes at once */
 	while (state->bits_in_buffer >= 8) {
 		if (strm->avail_out == 0) return Z_BUF_ERROR;
 
@@ -333,8 +333,17 @@ static int get_bit(z_stream *strm, inflate_state *state) {
 
 /* Get n bits from the input stream (right-aligned) */
 static int get_bits (z_stream *strm, inflate_state *state, int n) {
-	int i, result = 0;
-	for (i = 0; i < n; i++) {
+	/* Fast path: if we have enough bits in buffer, use them directly */
+	if (state->bits_in_buffer >= n) {
+		int result = state->bit_buffer & ((1 << n) - 1);
+		state->bit_buffer >>= n;
+		state->bits_in_buffer -= n;
+		return result;
+	}
+	
+	/* Slow path: need to get more bits from input */
+	int result = 0;
+	for (int i = 0; i < n; i++) {
 		int bit = get_bit(strm, state);
 		if (bit < 0) {
 			return -1; /* Error - not enough input */
@@ -882,23 +891,29 @@ int deflate(z_stream *strm, int flush) {
 				uint16_t length_code;
 				uint8_t extra_bits;
 
+				/* Calculate length code and extra bits more efficiently */
 				if (match_len <= 10) {
 					length_code = 257 + (match_len - 3);
 					extra_bits = 0;
-				} else if (match_len <= 18) {
-					length_code = 265 + ((match_len - 11) / 2);
-					extra_bits = 1;
 				} else if (match_len <= 34) {
-					length_code = 269 + ((match_len - 19) / 4);
-					extra_bits = 2;
-				} else if (match_len <= 66) {
-					length_code = 273 + ((match_len - 35) / 8);
-					extra_bits = 3;
+					/* Use binary search for mid-range */
+					if (match_len <= 18) {
+						length_code = 265 + ((match_len - 11) >> 1);
+						extra_bits = 1;
+					} else {
+						length_code = 269 + ((match_len - 19) >> 2);
+						extra_bits = 2;
+					}
 				} else if (match_len <= 130) {
-					length_code = 277 + ((match_len - 67) / 16);
-					extra_bits = 4;
+					if (match_len <= 66) {
+						length_code = 273 + ((match_len - 35) >> 3);
+						extra_bits = 3;
+					} else {
+						length_code = 277 + ((match_len - 67) >> 4);
+						extra_bits = 4;
+					}
 				} else {
-					length_code = 281 + ((match_len - 131) / 32);
+					length_code = 281 + ((match_len - 131) >> 5);
 					extra_bits = 5;
 				}
 
@@ -909,24 +924,13 @@ int deflate(z_stream *strm, int flush) {
 
 				/* Write extra bits for length if needed */
 				if (extra_bits > 0) {
-					int extra_value = 0;
-					switch (extra_bits) {
-					case 1:
-						extra_value = (match_len - 11) % 2;
-						break;
-					case 2:
-						extra_value = (match_len - 19) % 4;
-						break;
-					case 3:
-						extra_value = (match_len - 35) % 8;
-						break;
-					case 4:
-						extra_value = (match_len - 67) % 16;
-						break;
-					case 5:
-						extra_value = (match_len - 131) % 32;
-						break;
-					}
+					/* Calculate extra bits value - it's just the remainder when dividing by 2^extra_bits */
+					int extra_value = match_len - (
+						extra_bits == 1 ? 11 :
+						extra_bits == 2 ? 19 :
+						extra_bits == 3 ? 35 :
+						extra_bits == 4 ? 67 : 131
+					) & ((1 << extra_bits) - 1);
 					write_bits(strm, state, extra_value, extra_bits);
 				}
 
@@ -937,48 +941,69 @@ int deflate(z_stream *strm, int flush) {
 				uint16_t distance_code;
 				uint8_t dist_extra_bits;
 
+				/* Calculate distance code and extra bits - simplify with binary search */
 				if (distance <= 4) {
 					distance_code = distance - 1;
 					dist_extra_bits = 0;
-				} else if (distance <= 8) {
-					distance_code = 4 + ((distance - 5) / 2);
-					dist_extra_bits = 1;
-				} else if (distance <= 16) {
-					distance_code = 6 + ((distance - 9) / 4);
-					dist_extra_bits = 2;
-				} else if (distance <= 32) {
-					distance_code = 8 + ((distance - 17) / 8);
-					dist_extra_bits = 3;
-				} else if (distance <= 64) {
-					distance_code = 10 + ((distance - 33) / 16);
-					dist_extra_bits = 4;
-				} else if (distance <= 128) {
-					distance_code = 12 + ((distance - 65) / 32);
-					dist_extra_bits = 5;
 				} else if (distance <= 256) {
-					distance_code = 14 + ((distance - 129) / 64);
-					dist_extra_bits = 6;
-				} else if (distance <= 512) {
-					distance_code = 16 + ((distance - 257) / 128);
-					dist_extra_bits = 7;
-				} else if (distance <= 1024) {
-					distance_code = 18 + ((distance - 513) / 256);
-					dist_extra_bits = 8;
-				} else if (distance <= 2048) {
-					distance_code = 20 + ((distance - 1025) / 512);
-					dist_extra_bits = 9;
-				} else if (distance <= 4096) {
-					distance_code = 22 + ((distance - 2049) / 1024);
-					dist_extra_bits = 10;
-				} else if (distance <= 8192) {
-					distance_code = 24 + ((distance - 4097) / 2048);
-					dist_extra_bits = 11;
-				} else if (distance <= 16384) {
-					distance_code = 26 + ((distance - 8193) / 4096);
-					dist_extra_bits = 12;
+					/* Use binary search for common case */
+					if (distance <= 32) {
+						if (distance <= 16) {
+							if (distance <= 8) {
+								distance_code = 4 + ((distance - 5) >> 1);
+								dist_extra_bits = 1;
+							} else {
+								distance_code = 6 + ((distance - 9) >> 2);
+								dist_extra_bits = 2;
+							}
+						} else {
+							distance_code = 8 + ((distance - 17) >> 3);
+							dist_extra_bits = 3;
+						}
+					} else if (distance <= 128) {
+						if (distance <= 64) {
+							distance_code = 10 + ((distance - 33) >> 4);
+							dist_extra_bits = 4;
+						} else {
+							distance_code = 12 + ((distance - 65) >> 5);
+							dist_extra_bits = 5;
+						}
+					} else {
+						distance_code = 14 + ((distance - 129) >> 6);
+						dist_extra_bits = 6;
+					}
 				} else {
-					distance_code = 28 + ((distance - 16385) / 8192);
-					dist_extra_bits = 13;
+					/* Calculate for larger distances */
+					if (distance <= 4096) {
+						if (distance <= 1024) {
+							if (distance <= 512) {
+								distance_code = 16 + ((distance - 257) >> 7);
+								dist_extra_bits = 7;
+							} else {
+								distance_code = 18 + ((distance - 513) >> 8);
+								dist_extra_bits = 8;
+							}
+						} else if (distance <= 2048) {
+							distance_code = 20 + ((distance - 1025) >> 9);
+							dist_extra_bits = 9;
+						} else {
+							distance_code = 22 + ((distance - 2049) >> 10);
+							dist_extra_bits = 10;
+						}
+					} else {
+						if (distance <= 16384) {
+							if (distance <= 8192) {
+								distance_code = 24 + ((distance - 4097) >> 11);
+								dist_extra_bits = 11;
+							} else {
+								distance_code = 26 + ((distance - 8193) >> 12);
+								dist_extra_bits = 12;
+							}
+						} else {
+							distance_code = 28 + ((distance - 16385) >> 13);
+							dist_extra_bits = 13;
+						}
+					}
 				}
 
 				/* Write distance code */
@@ -988,48 +1013,12 @@ int deflate(z_stream *strm, int flush) {
 
 				/* Write extra bits for distance if needed */
 				if (dist_extra_bits > 0) {
-					int extra_value = 0;
-					switch (dist_extra_bits) {
-					case 1:
-						extra_value = (distance - 5) % 2;
-						break;
-					case 2:
-						extra_value = (distance - 9) % 4;
-						break;
-					case 3:
-						extra_value = (distance - 17) % 8;
-						break;
-					case 4:
-						extra_value = (distance - 33) % 16;
-						break;
-					case 5:
-						extra_value = (distance - 65) % 32;
-						break;
-					case 6:
-						extra_value = (distance - 129) % 64;
-						break;
-					case 7:
-						extra_value = (distance - 257) % 128;
-						break;
-					case 8:
-						extra_value = (distance - 513) % 256;
-						break;
-					case 9:
-						extra_value = (distance - 1025) % 512;
-						break;
-					case 10:
-						extra_value = (distance - 2049) % 1024;
-						break;
-					case 11:
-						extra_value = (distance - 4097) % 2048;
-						break;
-					case 12:
-						extra_value = (distance - 8193) % 4096;
-						break;
-					case 13:
-						extra_value = (distance - 16385) % 8192;
-						break;
-					}
+					/* Calculate base distance value based on distance code */
+					const uint16_t dist_base_values[] = {1, 5, 9, 17, 33, 65, 129, 257, 513, 1025, 2049, 4097, 8193, 16385};
+					uint16_t base_dist = dist_extra_bits > 0 ? dist_base_values[dist_extra_bits] : 1;
+					
+					/* Get remainder by masking with appropriate bit mask */
+					int extra_value = (distance - base_dist) & ((1 << dist_extra_bits) - 1);
 					write_bits(strm, state, extra_value, dist_extra_bits);
 				}
 
