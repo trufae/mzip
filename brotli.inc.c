@@ -1,32 +1,22 @@
-/* brotli.inc.c - Minimalistic Brotli implementation compatible with zlib-like API
- * Version: 0.1 (2025-07-29)
+/* brotli.inc.c - Full Brotli integration (enc/dec) with zlib-like wrappers
  *
- * This single-file implementation provides a tiny subset of Brotli API with
- * zlib-compatible wrappers:
+ * This unit integrates the upstream Google Brotli C implementation (encoder
+ * and decoder) directly into this repository and exposes a small zlib-like
+ * API used by mzip. No external libraries are required.
  *
- *   brotliInit
- *   brotliCompress
- *   brotliEnd
- *   brotliDecompressInit
- *   brotliDecompress
- *   brotliDecompressEnd
- *
- * It supports:
- * - Basic Brotli compression/decompression
- * - Bare minimum functionality to support ZIP file reading/writing
- * - Compatible interface with existing compression implementations
- *
- * Usage:
- *   #define MBROTLI_IMPLEMENTATION in one source file before including
- *
- * License: MIT
+ * Exposed wrappers (zlib-like):
+ *   - brotliInit / brotliCompress / brotliEnd
+ *   - brotliDecompressInit / brotliDecompress / brotliDecompressEnd
  */
 
 #ifndef MBROTLI_H
 #define MBROTLI_H
 
-/* Include the encoder and decoder components */
+#ifdef MZIP_ENABLE_BROTLI
+/* Thin zlib-like wrappers around vendored Brotli implementation */
 #include "brotli-enc.inc.c"
 #include "brotli-dec.inc.c"
+
+#endif /* MZIP_ENABLE_BROTLI */
 
 #endif /* MBROTLI_H */

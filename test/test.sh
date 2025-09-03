@@ -63,62 +63,67 @@ test_unzip() {
 }
 
 test_zip() {
-	init
-	echo "[***] Testing mzip $1 (0 = store, 1 = deflate, 3 = lzma)"
-	echo "Creating test.zip with mzip -c test.zip hello.txt world.txt -z$1"
-	# Use the compression method specified by the parameter
-	$MZ -c test.zip hello.txt world.txt -z$1
-	echo "Archive contents:"
-	xxd -g 1 test.zip | head -n 20
-	unzip -l test.zip > files.txt
-	grep hello.txt files.txt > /dev/null || error "hello.txt not found"
-	grep world.txt files.txt > /dev/null || error "world.txt not found"
-	echo "[---] Decompressing with unzip"
-	{
-		mkdir data
-		cd data
-		unzip ../test.zip
-		echo "unzip-extracted hello.txt:"
-		hexdump -C hello.txt
-		echo "original hello.txt:"
-		hexdump -C ../hello.txt
-		echo "CHECKING CONTENTS (ignoring line endings):"
-		cat hello.txt | od -c
-		echo "CONTENT LENGTH: $(wc -c < hello.txt) bytes"
-		cat ../hello.txt | od -c
-		echo "CONTENT LENGTH: $(wc -c < ../hello.txt) bytes"
-		
-		# Simple string comparison - extract just the word without newlines
-		echo "EXTRACTING JUST THE WORD:"
-		WORD1=$(tr -d '\r\n' < hello.txt)
-		WORD2=$(tr -d '\r\n' < ../hello.txt)
-		echo "Word from unzip: '$WORD1'"
-		echo "Word from original: '$WORD2'"
-		
-		# Compare the words
-		[ "$WORD1" = "$WORD2" ] || error "uncompressed hello.txt fail"
-		echo "unzip-extracted world.txt:"
-		hexdump -C world.txt
-		echo "original world.txt:"
-		hexdump -C ../world.txt
-		echo "CHECKING CONTENTS (ignoring line endings):"
-		cat world.txt | od -c
-		echo "CONTENT LENGTH: $(wc -c < world.txt) bytes"
-		cat ../world.txt | od -c
-		echo "CONTENT LENGTH: $(wc -c < ../world.txt) bytes"
-		
-		# Simple string comparison - extract just the word without newlines
-		echo "EXTRACTING JUST THE WORD:"
-		WORD1=$(tr -d '\r\n' < world.txt)
-		WORD2=$(tr -d '\r\n' < ../world.txt)
-		echo "Word from unzip: '$WORD1'"
-		echo "Word from original: '$WORD2'"
-		
-		# Compare the words
-		[ "$WORD1" = "$WORD2" ] || error "uncompressed world.txt fail"
-		cd ..
-		rm -rf data
-	}
+    init
+    echo "[***] Testing mzip $1 (0 = store, 1 = deflate, 3 = lzma, 5 = brotli)"
+    echo "Creating test.zip with mzip -c test.zip hello.txt world.txt -z$1"
+    # Use the compression method specified by the parameter
+    $MZ -c test.zip hello.txt world.txt -z$1
+    echo "Archive contents:"
+    xxd -g 1 test.zip | head -n 20
+    unzip -l test.zip > files.txt
+    grep hello.txt files.txt > /dev/null || error "hello.txt not found"
+    grep world.txt files.txt > /dev/null || error "world.txt not found"
+    # unzip does not support extracting some non-standard methods (e.g., brotli=97)
+    if [ "$1" != "5" ]; then
+        echo "[---] Decompressing with unzip"
+        {
+            mkdir data
+            cd data
+            unzip ../test.zip
+            echo "unzip-extracted hello.txt:"
+            hexdump -C hello.txt
+            echo "original hello.txt:"
+            hexdump -C ../hello.txt
+            echo "CHECKING CONTENTS (ignoring line endings):"
+            cat hello.txt | od -c
+            echo "CONTENT LENGTH: $(wc -c < hello.txt) bytes"
+            cat ../hello.txt | od -c
+            echo "CONTENT LENGTH: $(wc -c < ../hello.txt) bytes"
+            
+            # Simple string comparison - extract just the word without newlines
+            echo "EXTRACTING JUST THE WORD:"
+            WORD1=$(tr -d '\r\n' < hello.txt)
+            WORD2=$(tr -d '\r\n' < ../hello.txt)
+            echo "Word from unzip: '$WORD1'"
+            echo "Word from original: '$WORD2'"
+            
+            # Compare the words
+            [ "$WORD1" = "$WORD2" ] || error "uncompressed hello.txt fail"
+            echo "unzip-extracted world.txt:"
+            hexdump -C world.txt
+            echo "original world.txt:"
+            hexdump -C ../world.txt
+            echo "CHECKING CONTENTS (ignoring line endings):"
+            cat world.txt | od -c
+            echo "CONTENT LENGTH: $(wc -c < world.txt) bytes"
+            cat ../world.txt | od -c
+            echo "CONTENT LENGTH: $(wc -c < ../world.txt) bytes"
+            
+            # Simple string comparison - extract just the word without newlines
+            echo "EXTRACTING JUST THE WORD:"
+            WORD1=$(tr -d '\r\n' < world.txt)
+            WORD2=$(tr -d '\r\n' < ../world.txt)
+            echo "Word from unzip: '$WORD1'"
+            echo "Word from original: '$WORD2'"
+            
+            # Compare the words
+            [ "$WORD1" = "$WORD2" ] || error "uncompressed world.txt fail"
+            cd ..
+            rm -rf data
+        }
+    else
+        echo "[---] Skipping unzip extraction for brotli (method 97)"
+    fi
 	echo "[---] Decompressing with mzip"
 	{
 		mkdir -p data
@@ -190,14 +195,15 @@ test_unzip_lzma || exit 1
 MODE="store"; test_zip "0" || exit 1
 MODE="deflate"; test_zip "1" || exit 1
 MODE="lzma"; test_zip "3" || exit 1
+MODE="brotli"; test_zip "5" || exit 1
 
 # Additional corner-case tests
 
 test_empty_files() {
     init
-    echo "[***] Testing empty files with store/deflate/lzma"
+    echo "[***] Testing empty files with store/deflate/lzma/brotli"
     : > empty.txt
-    for Z in 0 1 3; do
+    for Z in 0 1 3 5; do
         rm -f test.zip
         $MZ -c test.zip empty.txt -z$Z || error "mzip failed for -z$Z"
         unzip -l test.zip > files.txt || error "unzip -l failed"
@@ -213,11 +219,11 @@ test_empty_files() {
 
 test_binary_file() {
     init
-    echo "[***] Testing binary file (0..255) with store/deflate/lzma"
+    echo "[***] Testing binary file (0..255) with store/deflate/lzma/brotli"
     # create 256-byte binary with values 0..255
     i=0; : > bin.dat
     while [ $i -lt 256 ]; do printf "\\$(printf '%03o' $i)" >> bin.dat; i=$((i+1)); done
-    for Z in 0 1 3; do
+    for Z in 0 1 3 5; do
         rm -f test.zip
         $MZ -c test.zip bin.dat -z$Z || error "mzip failed for -z$Z"
         unzip -l test.zip > files.txt || error "unzip -l failed"
@@ -264,7 +270,7 @@ test_space_in_name() {
     init
     echo "[***] Testing filename with spaces"
     printf "spaced content\n" > "space name.txt"
-    for Z in 0 1 3; do
+    for Z in 0 1 3 5; do
         rm -f test.zip
         $MZ -c test.zip "space name.txt" -z$Z || error "mzip failed for -z$Z"
         $MZ -l test.zip | grep "space name.txt" >/dev/null || error "missing spaced name (-z$Z)"

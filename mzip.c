@@ -641,41 +641,56 @@ static int mzip_compress_data(uint8_t *in_buf, size_t in_size, uint8_t **out_buf
 	}
 #endif
 #ifdef MZIP_ENABLE_BROTLI
-	if (*method == MZIP_METHOD_BROTLI) {
-		/* Brotli compression */
-		*out_buf = (uint8_t*)malloc (in_size * 2); /* Worst case scenario */
-		if (!*out_buf) {
-			return -1;
-		}
-		z_stream strm = {0};
-		if (brotliInit (&strm, Z_DEFAULT_COMPRESSION) != Z_OK) {
-			free (*out_buf);
-			return -1;
-		}
+    if (*method == MZIP_METHOD_BROTLI) {
+        /* Brotli compression (using vendored upstream implementation via wrappers) */
+        size_t out_cap = (in_size ? (in_size * 2 + 64) : 128);
+        *out_buf = (uint8_t*)malloc(out_cap);
+        if (!*out_buf) {
+            return -1;
+        }
+        z_stream strm = {0};
+        if (brotliInit(&strm, Z_DEFAULT_COMPRESSION) != Z_OK) {
+            free(*out_buf);
+            *out_buf = NULL;
+            return -1;
+        }
 
-		strm.next_in = in_buf;
-		strm.avail_in = in_size;
-		strm.next_out = *out_buf;
-		strm.avail_out = in_size * 2;
+        strm.next_in = in_buf;
+        strm.avail_in = (uInt)in_size;
+        strm.next_out = *out_buf;
+        strm.avail_out = (uInt)out_cap;
 
-		int ret = brotliCompress (&strm, Z_FINISH);
-		if (ret != Z_STREAM_END) {
-			brotliEnd (&strm);
-			free (*out_buf);
-			*out_buf = NULL;
-			return -1;
-		}
-		*out_size = strm.total_out;
-		brotliEnd (&strm);
+        int ret = brotliCompress(&strm, Z_FINISH);
+        if (ret != Z_STREAM_END) {
+            /* If we ran out of space, grow once and retry */
+            if (ret == Z_OK && strm.avail_out == 0) {
+                size_t used = (size_t)strm.total_out;
+                out_cap *= 2;
+                uint8_t *nb = (uint8_t*)realloc(*out_buf, out_cap);
+                if (!nb) { brotliEnd(&strm); free(*out_buf); *out_buf=NULL; return -1; }
+                *out_buf = nb;
+                strm.next_out = *out_buf + used;
+                strm.avail_out = (uInt)(out_cap - used);
+                ret = brotliCompress(&strm, Z_FINISH);
+            }
+        }
+        if (ret != Z_STREAM_END) {
+            brotliEnd(&strm);
+            free(*out_buf);
+            *out_buf = NULL;
+            return -1;
+        }
+        *out_size = (uint32_t)strm.total_out;
+        brotliEnd(&strm);
 
-		/* If compression didn't reduce size, fall back to STORE */
-		if (*out_size >= in_size) {
-			free (*out_buf);
-			*method = MZIP_METHOD_STORE;
-			return mzip_compress_data (in_buf, in_size, out_buf, out_size, method);
-		}
-		return 0;
-	}
+        /* For empty inputs, Brotli still emits a minimal frame; keep it. */
+        if (in_size > 0 && *out_size >= in_size) {
+            free(*out_buf);
+            *method = MZIP_METHOD_STORE;
+            return mzip_compress_data(in_buf, in_size, out_buf, out_size, method);
+        }
+        return 0;
+    }
 #endif
 
 	/* Unsupported method or none of the above */
