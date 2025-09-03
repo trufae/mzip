@@ -191,3 +191,94 @@ MODE="store"; test_zip "0" || exit 1
 MODE="deflate"; test_zip "1" || exit 1
 MODE="lzma"; test_zip "3" || exit 1
 
+# Additional corner-case tests
+
+test_empty_files() {
+    init
+    echo "[***] Testing empty files with store/deflate/lzma"
+    : > empty.txt
+    for Z in 0 1 3; do
+        rm -f test.zip
+        $MZ -c test.zip empty.txt -z$Z || error "mzip failed for -z$Z"
+        unzip -l test.zip > files.txt || error "unzip -l failed"
+        grep "empty.txt" files.txt >/dev/null || error "empty.txt missing (-z$Z)"
+        mkdir -p data && cd data
+        $MZ -x ../test.zip >/dev/null || error "mzip -x failed (-z$Z)"
+        [ -f empty.txt ] || error "empty.txt not extracted (-z$Z)"
+        cmp -s empty.txt ../empty.txt || error "empty.txt mismatch (-z$Z)"
+        cd .. && rm -rf data
+    done
+    fini
+}
+
+test_binary_file() {
+    init
+    echo "[***] Testing binary file (0..255) with store/deflate/lzma"
+    # create 256-byte binary with values 0..255
+    i=0; : > bin.dat
+    while [ $i -lt 256 ]; do printf "\\$(printf '%03o' $i)" >> bin.dat; i=$((i+1)); done
+    for Z in 0 1 3; do
+        rm -f test.zip
+        $MZ -c test.zip bin.dat -z$Z || error "mzip failed for -z$Z"
+        unzip -l test.zip > files.txt || error "unzip -l failed"
+        grep "bin.dat" files.txt >/dev/null || error "bin.dat missing (-z$Z)"
+        mkdir -p data && cd data
+        $MZ -x ../test.zip >/dev/null || error "mzip -x failed (-z$Z)"
+        cmp -s bin.dat ../bin.dat || error "binary mismatch (-z$Z)"
+        cd .. && rm -rf data
+    done
+    fini
+}
+
+test_large_random_and_fallback() {
+    init
+    echo "[***] Testing random data with LZMA (validate robust handling)"
+    dd if=/dev/urandom of=rand.bin bs=1k count=4 2>/dev/null || error "cannot create random"
+    $MZ -c test.zip rand.bin -z3 || error "mzip failed -z3"
+    # Validate archive and extraction
+    unzip -l test.zip > files.txt || error "unzip -l failed"
+    grep "rand.bin" files.txt >/dev/null || error "rand.bin missing"
+    mkdir -p data && cd data
+    $MZ -x ../test.zip >/dev/null || error "mzip -x failed"
+    cmp -s rand.bin ../rand.bin || error "random mismatch after extract"
+    cd .. && rm -rf data
+    fini
+}
+
+test_duplicate_names_listing() {
+    init
+    echo "[***] Testing duplicate filenames in archive listing"
+    mkdir -p a b
+    echo one > a/dup.txt
+    echo two > b/dup.txt
+    # Add both; tool stores base names, creating two entries with same name
+    $MZ -c test.zip a/dup.txt b/dup.txt -z1 || error "mzip failed"
+    out=$($MZ -l test.zip)
+    echo "$out"
+    cnt=$(printf "%s" "$out" | grep -c "dup.txt")
+    [ "$cnt" -eq 2 ] || error "expected 2 dup.txt entries, got $cnt"
+    fini
+}
+
+test_space_in_name() {
+    init
+    echo "[***] Testing filename with spaces"
+    printf "spaced content\n" > "space name.txt"
+    for Z in 0 1 3; do
+        rm -f test.zip
+        $MZ -c test.zip "space name.txt" -z$Z || error "mzip failed for -z$Z"
+        $MZ -l test.zip | grep "space name.txt" >/dev/null || error "missing spaced name (-z$Z)"
+        mkdir -p data && cd data
+        $MZ -x ../test.zip >/dev/null || error "mzip -x failed (-z$Z)"
+        diff -u "space name.txt" ../"space name.txt" || error "spaced filename mismatch (-z$Z)"
+        cd .. && rm -rf data
+    done
+    fini
+}
+
+# Run new tests
+test_empty_files || exit 1
+test_binary_file || exit 1
+test_large_random_and_fallback || exit 1
+test_duplicate_names_listing || exit 1
+test_space_in_name || exit 1
