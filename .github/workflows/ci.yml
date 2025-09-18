@@ -74,7 +74,7 @@ jobs:
       - name: Test meson build (Windows)
         if: matrix.os == 'windows-latest'
         run: |
-          meson setup build --backend=vs
+          meson setup build --backend=ninja
           ninja -C build
           copy build\mzip.exe mzip.exe
           dir mzip.exe
