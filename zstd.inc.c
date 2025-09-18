@@ -171,8 +171,9 @@ static uint32_t read_le32(const void *ptr) {
 
 /* Simple RLE compression for Zstandard block */
 static int compress_block(const uint8_t *src, size_t src_size, 
-		uint8_t *dst, size_t dst_capacity, 
-		int level) {
+        uint8_t *dst, size_t dst_capacity, 
+                int level) {
+    (void)level; /* Unused in this minimal implementation */
 	/* This is a very simplified compression that only does basic RLE */
 	if (src_size == 0 || !src || !dst) {
 		return 0;  /* Empty input or invalid pointers */
@@ -373,8 +374,8 @@ int zstdCompress(z_stream *strm, int flush) {
 		uint8_t *block_content;
 		uint32_t content_size;
 
-		if (compressed_size > 0 && compressed_size < block_size) {
-			/* Compressed block (type=2) */
+                if (compressed_size > 0 && (uint32_t)compressed_size < block_size) {
+                    /* Compressed block (type=2) */
 			block_header = 0x02;
 			block_content = ctx->compress_buffer;
 			content_size = compressed_size;
@@ -493,9 +494,10 @@ int zstdDecompressInit(z_stream *strm) {
 
 /* Decompress data using Zstandard format */
 int zstdDecompress(z_stream *strm, int flush) {
-	if (!strm || !strm->state) {
-		return Z_STREAM_ERROR;
-	}
+    if (!strm || !strm->state) {
+        return Z_STREAM_ERROR;
+    }
+    (void)flush;
 
 	zstd_decompress_context *ctx = (zstd_decompress_context *)strm->state;
 
@@ -644,10 +646,10 @@ int zstdDecompress(z_stream *strm, int flush) {
 				}
 
 				/* Output if space allows */
-				if (strm->avail_out >= decompressed_size) {
-					memcpy(strm->next_out, ctx->decompress_buffer, decompressed_size);
-					strm->next_out += decompressed_size;
-					strm->avail_out -= decompressed_size;
+                if (strm->avail_out >= (uint32_t)decompressed_size) {
+                    memcpy(strm->next_out, ctx->decompress_buffer, decompressed_size);
+                    strm->next_out += decompressed_size;
+                    strm->avail_out -= decompressed_size;
 					strm->total_out += decompressed_size;
 
 					/* Copy to window buffer */

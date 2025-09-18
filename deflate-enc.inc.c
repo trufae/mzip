@@ -181,6 +181,9 @@ int deflateInit2(z_stream *strm, int level, int method, int windowBits,
 	if (!strm) {
 		return Z_STREAM_ERROR;
 	}
+	(void)method;
+	(void)memLevel;
+	(void)strategy;
 
 	/* Validate parameters - handle negative windowBits for raw deflate */
 	int abs_windowBits = windowBits < 0 ? -windowBits : windowBits;
@@ -365,12 +368,12 @@ int deflate(z_stream *strm, int flush) {
 				/* Write extra bits for length if needed */
 				if (extra_bits > 0) {
 					/* Calculate extra bits value - it's just the remainder when dividing by 2^extra_bits */
-					int extra_value = match_len - (
-						extra_bits == 1 ? 11 :
-						extra_bits == 2 ? 19 :
-						extra_bits == 3 ? 35 :
-						extra_bits == 4 ? 67 : 131
-					) & ((1 << extra_bits) - 1);
+                int extra_value = (match_len - (
+                                                extra_bits == 1 ? 11 :
+                                                extra_bits == 2 ? 19 :
+                                                extra_bits == 3 ? 35 :
+                                                extra_bits == 4 ? 67 : 131
+                                        )) & ((1 << extra_bits) - 1);
 					write_bits(strm, state, extra_value, extra_bits);
 				}
 

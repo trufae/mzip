@@ -22,16 +22,16 @@ uninstall:
 	rm -f $(DESTDIR)$(BINDIR)/mzip
 
 test:
-	meson build-test && ninja -C build-test
-	cp -f build-test/mzip ./mzip
+	meson build && ninja -C build
+	cp -f build/mzip ./mzip
 	$(MAKE) -C test
-	rm -rf build-test
+	rm -rf build
 
 test2:
-	meson build-test -Db_sanitize=address && ninja -C build-test
-	cp -f build-test/mzip ./mzip
+	meson build -Db_sanitize=address && ninja -C build
+	cp -f build/mzip ./mzip
 	CFLAGS="-fsanitize=address $(CFLAGS)" $(MAKE) -C test
-	rm -rf build-test
+	rm -rf build
 
 clean:
 	rm -rf build mzip

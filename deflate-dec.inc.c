@@ -3,9 +3,9 @@
 /* Internal state for inflate */
 typedef struct {
 	/* Input state */
-	uint32_t bit_buffer;     /* Bit buffer */
-	uint32_t bits_in_buffer; /* Number of bits in buffer */
-	uint8_t final_block;     /* Is this the final block? */
+    uint32_t bit_buffer;     /* Bit buffer */
+    uint32_t bits_in_buffer; /* Number of bits in buffer */
+    int final_block;         /* Is this the final block? */
 
 	/* Huffman tables */
 	huffman_table literals;  /* Literal/length codes */
@@ -45,13 +45,13 @@ static int get_bit(z_stream *strm, inflate_state *state) {
 
 /* Get n bits from the input stream (right-aligned) */
 static int get_bits(z_stream *strm, inflate_state *state, int n) {
-	/* Fast path: if we have enough bits in buffer, use them directly */
-	if (state->bits_in_buffer >= n) {
-		int result = state->bit_buffer & ((1 << n) - 1);
-		state->bit_buffer >>= n;
-		state->bits_in_buffer -= n;
-		return result;
-	}
+    /* Fast path: if we have enough bits in buffer, use them directly */
+    if (state->bits_in_buffer >= (uint32_t)n) {
+        int result = state->bit_buffer & ((1 << n) - 1);
+        state->bit_buffer >>= n;
+        state->bits_in_buffer -= (uint32_t)n;
+        return result;
+    }
 	
 	/* Slow path: need to get more bits from input */
 	int result = 0;
@@ -606,14 +606,14 @@ int inflate(z_stream *strm, int flush) {
 					}
 
 					/* Copy bytes from window */
-					if (distance > state->window_size) {
-						return Z_DATA_ERROR; /* Distance too far back */
-					}
+                if ((uint32_t)distance > state->window_size) {
+                    return Z_DATA_ERROR; /* Distance too far back */
+                }
 
 					/* Make sure we have enough output space */
-					if (strm->avail_out < length) {
-						return Z_BUF_ERROR;
-					}
+                if (strm->avail_out < (uint32_t)length) {
+                    return Z_BUF_ERROR;
+                }
 
 					/* Copy the bytes */
 					for (int i = 0; i < length; i++) {

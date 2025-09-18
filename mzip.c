@@ -102,8 +102,11 @@ static long mzip_find_eocd(FILE *fp, uint8_t *eocd_out /*22+*/, size_t *cd_size,
 	if (file_size < 22) {
 		return -1;
 	}
-	const size_t max_back = 0x10000 + 22; /* spec: comment <= 65535 */
-	size_t search_len = (size_t)(file_size < (long)max_back ? file_size : max_back);
+    const size_t max_back = 0x10000 + 22; /* spec: comment <= 65535 */
+    /* Ensure both operands of the ?: have the same unsigned type to avoid
+     * signed/unsigned conversions. If file_size is smaller than max_back,
+     * use file_size cast to size_t, otherwise use max_back. */
+    size_t search_len = (file_size < (long)max_back) ? (size_t)file_size : max_back;
 
 	if (fseek (fp, file_size - (long)search_len, SEEK_SET) != 0) {
 		return -1;
@@ -724,10 +727,14 @@ zip_int64_t zip_file_add(zip_t *za, const char *name, zip_source_t *src, zip_fla
 	struct mzip_entry *e = &za->entries[za->n_entries];
 	memset (e, 0, sizeof (struct mzip_entry));
 
-	e->name = strdup (name);
-	if (!e->name) {
-		return -1;
-	}
+        /* strdup is POSIX; allocate and copy to be portable and avoid
+         * implicit declaration warnings. */
+        size_t nlen = strlen(name) + 1;
+        e->name = (char*)malloc(nlen);
+        if (!e->name) {
+            return -1;
+        }
+        memcpy(e->name, name, nlen);
 
 	/* Use the default compression method if set, otherwise store */
 	if (za->default_method > 0) {
@@ -911,8 +918,8 @@ zip_file_t *zip_fopen_index(zip_t *za, zip_uint64_t index, zip_flags_t flags) {
 	if (!za || index >= za->n_entries) {
 		return NULL;
 	}
-	uint8_t  *buf;
-	uint32_t  sz;
+    uint8_t  *buf = NULL;
+    uint32_t  sz = 0;
 	if (mzip_extract_entry (za, &za->entries[index], &buf, &sz) != 0) {
 		return NULL;
 	}
