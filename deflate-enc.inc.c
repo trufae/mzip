@@ -182,8 +182,9 @@ int deflateInit2(z_stream *strm, int level, int method, int windowBits,
 		return Z_STREAM_ERROR;
 	}
 
-	/* Validate parameters */
-	if (windowBits < 8 || windowBits > 15) {
+	/* Validate parameters - handle negative windowBits for raw deflate */
+	int abs_windowBits = windowBits < 0 ? -windowBits : windowBits;
+	if (abs_windowBits < 8 || abs_windowBits > 15) {
 		return Z_STREAM_ERROR;
 	}
 
@@ -197,7 +198,7 @@ int deflateInit2(z_stream *strm, int level, int method, int windowBits,
 	}
 
 	/* Calculate window size (2^windowBits) */
-	state->window_size = 1 << windowBits;
+	state->window_size = 1 << abs_windowBits;
 	state->window_mask = state->window_size - 1;
 
 	/* Allocate sliding window */
@@ -208,7 +209,7 @@ int deflateInit2(z_stream *strm, int level, int method, int windowBits,
 	}
 
 	/* Allocate hash table - size depends on window size */
-	state->hash_size = 1 << (windowBits - 3); /* Smaller than window for memory efficiency */
+	state->hash_size = 1 << (abs_windowBits - 3); /* Smaller than window for memory efficiency */
 	state->hash_mask = state->hash_size - 1;
 	state->hash_table = (uint16_t *)calloc(state->hash_size, sizeof(uint16_t));
 	if (!state->hash_table) {

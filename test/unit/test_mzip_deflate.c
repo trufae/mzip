@@ -6,8 +6,6 @@
 #define MDEFLATE_IMPLEMENTATION
 #include "../../deflate.inc.c"
 
-#define Z_DEFLATED   8
-
 
 /* Simple test to compress and decompress data using our custom deflate implementation */
 

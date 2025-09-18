@@ -63,8 +63,8 @@ test_unzip() {
 }
 
 test_zip() {
-    init
-    echo "[***] Testing mzip $1 (0 = store, 1 = deflate, 3 = lzma, 5 = brotli)"
+     init
+     echo "[***] Testing mzip $1 (0 = store, 1 = deflate, 3 = lzma, 5 = brotli, 93 = zstd, 100 = lzfse)"
     echo "Creating test.zip with mzip -c test.zip hello.txt world.txt -z$1"
     # Use the compression method specified by the parameter
     $MZ -c test.zip hello.txt world.txt -z$1
@@ -196,14 +196,16 @@ MODE="store"; test_zip "0" || exit 1
 MODE="deflate"; test_zip "1" || exit 1
 MODE="lzma"; test_zip "3" || exit 1
 MODE="brotli"; test_zip "5" || exit 1
+MODE="zstd"; test_zip "93" || exit 1
+MODE="lzfse"; test_zip "100" || exit 1
 
 # Additional corner-case tests
 
 test_empty_files() {
-    init
-    echo "[***] Testing empty files with store/deflate/lzma/brotli"
-    : > empty.txt
-    for Z in 0 1 3 5; do
+     init
+     echo "[***] Testing empty files with store/deflate/lzma/brotli/zstd/lzfse"
+     : > empty.txt
+     for Z in 0 1 3 5 93 100; do
         rm -f test.zip
         $MZ -c test.zip empty.txt -z$Z || error "mzip failed for -z$Z"
         unzip -l test.zip > files.txt || error "unzip -l failed"
@@ -218,12 +220,12 @@ test_empty_files() {
 }
 
 test_binary_file() {
-    init
-    echo "[***] Testing binary file (0..255) with store/deflate/lzma/brotli"
+     init
+     echo "[***] Testing binary file (0..255) with store/deflate/lzma/brotli/zstd/lzfse"
     # create 256-byte binary with values 0..255
     i=0; : > bin.dat
     while [ $i -lt 256 ]; do printf "\\$(printf '%03o' $i)" >> bin.dat; i=$((i+1)); done
-    for Z in 0 1 3 5; do
+     for Z in 0 1 3 5 93 100; do
         rm -f test.zip
         $MZ -c test.zip bin.dat -z$Z || error "mzip failed for -z$Z"
         unzip -l test.zip > files.txt || error "unzip -l failed"
@@ -270,7 +272,7 @@ test_space_in_name() {
     init
     echo "[***] Testing filename with spaces"
     printf "spaced content\n" > "space name.txt"
-    for Z in 0 1 3 5; do
+     for Z in 0 1 3 5 93 100; do
         rm -f test.zip
         $MZ -c test.zip "space name.txt" -z$Z || error "mzip failed for -z$Z"
         $MZ -l test.zip | grep "space name.txt" >/dev/null || error "missing spaced name (-z$Z)"

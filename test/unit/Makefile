@@ -3,7 +3,7 @@ CFLAGS ?= -O2 -Wall -Wextra
 LDFLAGS ?=
 
 # Define test targets
-TESTS = test_deflate test_mzip_deflate
+TESTS = test_deflate test_mzip_deflate test_zstd test_lzfse
 
 all: $(TESTS)
 
@@ -11,6 +11,12 @@ test_deflate: test_deflate.c
 	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
 
 test_mzip_deflate: test_mzip_deflate.c
+	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
+
+test_zstd: test_zstd.c
+	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
+
+test_lzfse: test_lzfse.c
 	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
 
 clean:
