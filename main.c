@@ -20,6 +20,10 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <unistd.h>
+#ifdef _WIN32
+#include <direct.h>
+#include <io.h>
+#endif
 
 #ifndef PATH_MAX
 #define PATH_MAX 4096
@@ -27,6 +31,28 @@
 
 /* Force overwrite flag (set via -f / --force) */
 static int g_force = 0;
+
+/* Platform compatibility wrappers
+ * - mingw/msvc provide mkdir(const char*)/_mkdir and no lstat/S_ISLNK by default.
+ * - Provide small wrappers/macros so the rest of the code can use portable names. */
+#if defined(_WIN32) || defined(_WIN64)
+# define MZIP_MKDIR(path, mode) _mkdir(path)
+# define MZIP_LSTAT(path, buf) stat((path), (buf))
+# ifndef MZIP_FCHMOD
+#  ifdef _MSC_VER
+#   define MZIP_FCHMOD(fd, mode) _chsize_s((fd), (mode)) /* fallback; no direct fchmod */
+#  else
+#   define MZIP_FCHMOD(fd, mode) _fchmod((fd), (mode))
+#  endif
+# endif
+# ifndef S_ISLNK
+#  define S_ISLNK(mode) 0
+# endif
+#else
+# define MZIP_MKDIR(path, mode) mkdir((path), (mode))
+# define MZIP_LSTAT(path, buf) lstat((path), (buf))
+# define MZIP_FCHMOD(fd, mode) fchmod((fd),(mode))
+#endif
 
 static void usage(void) {
     puts("mzip – minimal ZIP reader/writer (mzip.h demo)\n"
@@ -264,7 +290,7 @@ static int ensure_parent_dirs(const char *path) {
         if (tmp[i] == '/') {
             tmp[i] = '\0';
             struct stat st;
-            if (lstat(tmp, &st) == 0) {
+            if (MZIP_LSTAT(tmp, &st) == 0) {
                 /* If the path exists, reject symlinks when policy says so */
                 if (S_ISLNK(st.st_mode)) {
                     if (g_extract_policy == POLICY_REJECT) {
@@ -281,10 +307,10 @@ static int ensure_parent_dirs(const char *path) {
                 if (errno == ENOENT) {
                     /* Try to create directory. If another thread/process created it
                      * concurrently, handle EEXIST by re-checking via lstat to avoid TOCTOU. */
-                    if (mkdir(tmp, 0755) != 0) {
+                    if (MZIP_MKDIR(tmp, 0755) != 0) {
                         if (errno == EEXIST) {
                             /* Re-check what exists */
-                            if (lstat(tmp, &st) != 0) {
+                            if (MZIP_LSTAT(tmp, &st) != 0) {
                                 tmp[i] = '/';
                                 return -1;
                             }
@@ -344,7 +370,7 @@ static int extract_all(const char *path) {
             if (ensure_parent_dirs(fname_sanitized) != 0) {
                 fprintf(stderr, "Failed to create directory for %s\n", fname_sanitized);
             } else {
-                if (mkdir(fname_sanitized, 0755) != 0 && errno != EEXIST) {
+                if (MZIP_MKDIR(fname_sanitized, 0755) != 0 && errno != EEXIST) {
                     fprintf(stderr, "Failed to create directory %s\n", fname_sanitized);
                 }
             }
@@ -360,7 +386,7 @@ static int extract_all(const char *path) {
 
         /* Avoid overwriting existing files unless force (-f) is specified. */
         struct stat pst;
-        if (lstat(fname_sanitized, &pst) == 0) {
+        if (MZIP_LSTAT(fname_sanitized, &pst) == 0) {
             if (!g_force) {
                 fprintf(stderr, "Skipping existing file (use -f to overwrite): %s\n", fname_sanitized);
                 zip_fclose(zf);
@@ -398,7 +424,7 @@ static int extract_all(const char *path) {
                     continue;
                 }
                 /* Force path: open for write/truncate but ensure it's not a symlink */
-                if (lstat(fname_sanitized, &pst) == 0 && S_ISLNK(pst.st_mode) && g_extract_policy == POLICY_REJECT) {
+                if (MZIP_LSTAT(fname_sanitized, &pst) == 0 && S_ISLNK(pst.st_mode) && g_extract_policy == POLICY_REJECT) {
                     fprintf(stderr, "Refusing to overwrite symlink: %s\n", fname_sanitized);
                     zip_fclose(zf);
                     continue;
@@ -432,7 +458,7 @@ static int extract_all(const char *path) {
         }
 
         /* Apply safe permissions (masking out SUID/SGID/sticky by using 0777 mask) */
-        if (fchmod(fd, desired_mode & 0777) != 0) {
+        if (MZIP_FCHMOD(fd, desired_mode & 0777) != 0) {
             /* Non-fatal: warn but continue */
             fprintf(stderr, "Warning: failed to set permissions on %s: %s\n", fname_sanitized, strerror(errno));
         }
@@ -457,7 +483,7 @@ static int extract_all(const char *path) {
         size_t entry_size = (size_t)zf->size;
         zip_fclose(zf);
         if (remain == 0) {
-            printf("Extracted %s (%zu bytes)\n", fname_sanitized, entry_size);
+            printf("Extracted %s (%lu bytes)\n", fname_sanitized, (unsigned long)entry_size);
         } else {
             fprintf(stderr, "Failed to fully write %s\n", fname_sanitized);
         }

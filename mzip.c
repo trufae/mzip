@@ -20,6 +20,11 @@
 #include "mzip.h"
 #include "zstream.h"
 
+#if defined(_WIN32) || defined(_WIN64)
+/* Ensure we have thread-safe fallback for localtime on Windows builds */
+# include <time.h>
+#endif
+
 #if MZIP_ENABLE_LZ4
 #include <r_util.h>
 #endif
@@ -72,17 +77,28 @@ int mzip_verify_crc = 0;
  * implementation validates and clamps fields. If time retrieval or
  * conversion fails, it falls back to 1980-01-01 00:00:00.
  */
+/* Provide a small portable wrapper for thread-safe localtime when possible.
+ * On POSIX systems prefer `localtime_r`; on Windows or when not available,
+ * fall back to `localtime()` and copy the result into the caller buffer. */
+static struct tm *mzip_localtime_r(const time_t *t, struct tm *out) {
+    /* Portable fallback: use non-reentrant `localtime()` and copy the result.
+     * This avoids implicit declaration issues on platforms that don't expose
+     * `localtime_r` while remaining simple for this small utility. */
+    struct tm *tmp = localtime(t);
+    if (!tmp) return NULL;
+    *out = *tmp;
+    return out;
+}
+
 static void mzip_get_dostime(uint16_t *dos_time, uint16_t *dos_date) {
     time_t now = time(NULL);
     struct tm tm_buf;
     struct tm *tm_ptr = NULL;
 
-#if defined(_POSIX_THREAD_SAFE_FUNCTIONS) || defined(__USE_POSIX)
     /* Prefer reentrant version when available */
-    if (now != (time_t)-1 && localtime_r(&now, &tm_buf) != NULL) {
+    if (now != (time_t)-1 && mzip_localtime_r(&now, &tm_buf) != NULL) {
         tm_ptr = &tm_buf;
     }
-#endif
     if (!tm_ptr) {
         struct tm *tmp = localtime(&now);
         if (tmp) {
