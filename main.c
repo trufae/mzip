@@ -39,11 +39,12 @@ static int g_force = 0;
 # define MZIP_MKDIR(path, mode) _mkdir(path)
 # define MZIP_LSTAT(path, buf) stat((path), (buf))
 # ifndef MZIP_FCHMOD
-#  ifdef _MSC_VER
-#   define MZIP_FCHMOD(fd, mode) _chsize_s((fd), (mode)) /* fallback; no direct fchmod */
-#  else
-#   define MZIP_FCHMOD(fd, mode) _fchmod((fd), (mode))
-#  endif
+/* On Windows (MinGW/MSVC) there's no reliable fchmod that maps to POSIX
+ * permissions. Setting unix-style permission bits isn't meaningful on NTFS in
+ * the same way; failures are non-fatal in extraction code, so make this a
+ * no-op that reports success. If a platform provides an fd-based fchmod,
+ * callers can override MZIP_FCHMOD. */
+#  define MZIP_FCHMOD(fd, mode) (0)
 # endif
 # ifndef S_ISLNK
 #  define S_ISLNK(mode) 0

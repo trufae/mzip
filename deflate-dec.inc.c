@@ -246,9 +246,12 @@ static int read_uncompressed_block(z_stream *strm, inflate_state *state) {
 	strm->total_in += 4;
 
 	/* Verify length */
-	if (len != (uint16_t)~nlen) {
-		return Z_DATA_ERROR; /* Length check failed */
-	}
+    /* Compare length with bitwise complement of nlen while avoiding
+     * signed/unsigned promotion warnings by casting nlen to uint16_t
+     * before applying ~. */
+    if (len != (uint16_t)(~(uint16_t)nlen)) {
+        return Z_DATA_ERROR; /* Length check failed */
+    }
 
 	/* Check if we have enough input */
 	if (strm->avail_in < len) {
