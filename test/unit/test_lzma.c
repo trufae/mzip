@@ -5,7 +5,7 @@
 
 /* Include LZMA implementation */
 #define MZIP_ENABLE_LZMA
-#include "../../lzma.inc.c"  /* This will include both encoder and decoder */
+#include "../../src/lzma.inc.c"  /* This will include both encoder and decoder */
 
 /* Simple test to compress and decompress data using LZMA */
 int test_lzma_compress_decompress() {

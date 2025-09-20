@@ -1,5 +1,6 @@
 CC ?= gcc
 CFLAGS ?= -O2 -Wall -Wextra
+CFLAGS += -I../../src/include
 LDFLAGS ?=
 
 # Define test targets

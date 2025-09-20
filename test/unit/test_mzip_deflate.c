@@ -4,7 +4,7 @@
 #include <stdint.h>
 
 #define MDEFLATE_IMPLEMENTATION
-#include "../../deflate.inc.c"
+#include "../../src/lib/deflate.inc.c"
 
 
 /* Simple test to compress and decompress data using our custom deflate implementation */

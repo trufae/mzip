@@ -3,12 +3,9 @@
 #include <string.h>
 #include <stdint.h>
 
-/* Use the shared z_stream definition */
-#include "../../zstream.h"
-
 /* Include ZSTD implementation */
 #define MZIP_ENABLE_ZSTD
-#include "../../zstd.inc.c"
+#include "../../src/lib/zstd.inc.c"
 
 /* Simple test to compress and decompress data using ZSTD */
 int test_zstd_compress_decompress() {

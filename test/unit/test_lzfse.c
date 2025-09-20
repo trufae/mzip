@@ -27,7 +27,7 @@ typedef struct z_stream_s {
 typedef unsigned int uInt;
 
 /* Include LZFSE implementation */
-#include "../../lzfse.inc.c"
+#include "../../src/lib/lzfse.inc.c"
 
 /* Simple test to compress and decompress data using LZFSE */
 int test_lzfse_compress_decompress() {
