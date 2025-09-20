@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "zstream.h"
+#include "mzip.h" /* for read/write little-endian helpers */
 
 typedef struct {
     int quality;
@@ -38,23 +39,24 @@ static size_t simple_compress(const uint8_t *input, size_t input_len,
     if (output_len < input_len + 8) return 0;
     memcpy(output, "BROT", 4);
     output[4] = 1;
-    memcpy(output + 5, &input_len, sizeof(size_t));
+    /* Store length/checksum in little-endian fixed widths to be portable
+     * across architectures (avoid writing host-endian `size_t`). */
+    mzip_write_le64(output + 5, (uint64_t)input_len);
     uint32_t checksum = my_crc32(input, input_len, 0);
-    memcpy(output + 5 + sizeof(size_t), &checksum, sizeof(uint32_t));
-    memcpy(output + 5 + sizeof(size_t) + sizeof(uint32_t), input, input_len);
-    return 5 + sizeof(size_t) + sizeof(uint32_t) + input_len;
+    mzip_write_le32(output + 5 + 8, checksum);
+    memcpy(output + 5 + 8 + 4, input, input_len);
+    return (size_t)(5 + 8 + 4 + input_len);
 }
 
 static size_t simple_decompress(const uint8_t *input, size_t input_len,
                                uint8_t *output, size_t output_len) {
     if (input_len < 5 + sizeof(size_t) + sizeof(uint32_t)) return 0;
     if (memcmp(input, "BROT", 4) != 0) return 0;
-    size_t stored_len;
-    memcpy(&stored_len, input + 5, sizeof(size_t));
+    /* Read fixed-width little-endian length and checksum */
+    uint64_t stored_len = mzip_read_le64(input + 5);
     if (stored_len > output_len) return 0;
-    if (input_len < 5 + sizeof(size_t) + sizeof(uint32_t) + stored_len) return 0;
-    uint32_t stored_crc;
-    memcpy(&stored_crc, input + 5 + sizeof(size_t), sizeof(uint32_t));
+    if (input_len < 5 + 8 + 4 + stored_len) return 0;
+    uint32_t stored_crc = mzip_read_le32(input + 5 + 8);
     const uint8_t *data = input + 5 + sizeof(size_t) + sizeof(uint32_t);
     uint32_t computed_crc = my_crc32(data, stored_len, 0);
     if (stored_crc != computed_crc) return 0;
@@ -128,10 +130,9 @@ int brotliDecompress(z_stream *strm, int flush) {
         strm->next_in, strm->avail_in,
         strm->next_out, strm->avail_out);
     if (decompressed_size == 0) {
-        size_t stored_len;
-        if (strm->avail_in >= 5 + sizeof(size_t)) {
-            memcpy(&stored_len, strm->next_in + 5, sizeof(size_t));
-            if (stored_len == 0) {
+        if (strm->avail_in >= 5 + 8) {
+            uint64_t stored_len_tmp = mzip_read_le64(strm->next_in + 5);
+            if (stored_len_tmp == 0) {
                 strm->next_in += strm->avail_in;
                 strm->total_in += strm->avail_in;
                 strm->avail_in = 0;
