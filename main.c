@@ -6,6 +6,7 @@
  *         ./mzip -a  archive.zip file1 file2...  # add files to existing archive
  */
 
+#define _POSIX_C_SOURCE 200809L
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -17,11 +18,15 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <unistd.h>
 
 #ifndef PATH_MAX
 #define PATH_MAX 4096
 #endif
+
+/* Force overwrite flag (set via -f / --force) */
+static int g_force = 0;
 
 static void usage(void) {
     puts("mzip – minimal ZIP reader/writer (mzip.h demo)\n"
@@ -260,15 +265,46 @@ static int ensure_parent_dirs(const char *path) {
             tmp[i] = '\0';
             struct stat st;
             if (lstat(tmp, &st) == 0) {
+                /* If the path exists, reject symlinks when policy says so */
                 if (S_ISLNK(st.st_mode)) {
-                    if (g_extract_policy == POLICY_REJECT) return -1;
-                    /* if policy allows, treat symlink as opaque and continue */
+                    if (g_extract_policy == POLICY_REJECT) {
+                        tmp[i] = '/';
+                        return -1;
+                    }
+                    /* POLICY_ALLOW: continue but do not create directories through symlinks */
                 }
-                if (!S_ISDIR(st.st_mode) && !S_ISLNK(st.st_mode)) return -1;
+                if (!S_ISDIR(st.st_mode) && !S_ISLNK(st.st_mode)) {
+                    tmp[i] = '/';
+                    return -1;
+                }
             } else {
                 if (errno == ENOENT) {
-                    if (mkdir(tmp, 0755) != 0) return -1;
+                    /* Try to create directory. If another thread/process created it
+                     * concurrently, handle EEXIST by re-checking via lstat to avoid TOCTOU. */
+                    if (mkdir(tmp, 0755) != 0) {
+                        if (errno == EEXIST) {
+                            /* Re-check what exists */
+                            if (lstat(tmp, &st) != 0) {
+                                tmp[i] = '/';
+                                return -1;
+                            }
+                            if (S_ISLNK(st.st_mode)) {
+                                if (g_extract_policy == POLICY_REJECT) {
+                                    tmp[i] = '/';
+                                    return -1;
+                                }
+                            }
+                            if (!S_ISDIR(st.st_mode)) {
+                                tmp[i] = '/';
+                                return -1;
+                            }
+                        } else {
+                            tmp[i] = '/';
+                            return -1;
+                        }
+                    }
                 } else {
+                    tmp[i] = '/';
                     return -1;
                 }
             }
@@ -322,20 +358,109 @@ static int extract_all(const char *path) {
             continue;
         }
 
-        FILE *out = fopen(fname_sanitized, "wb");
-        if (!out) {
-            fprintf(stderr, "Cannot create %s\n", fname_sanitized);
+        /* Avoid overwriting existing files unless force (-f) is specified. */
+        struct stat pst;
+        if (lstat(fname_sanitized, &pst) == 0) {
+            if (!g_force) {
+                fprintf(stderr, "Skipping existing file (use -f to overwrite): %s\n", fname_sanitized);
+                zip_fclose(zf);
+                continue;
+            }
+            /* If force is set and path is a symlink, reject unless policy allows */
+            if (S_ISLNK(pst.st_mode) && g_extract_policy == POLICY_REJECT) {
+                fprintf(stderr, "Refusing to overwrite symlink: %s\n", fname_sanitized);
+                zip_fclose(zf);
+                continue;
+            }
+        }
+
+        /* Determine safe mode from central directory external attributes.
+         * Mask to 0777 to avoid applying SUID/SGID/sticky from archive. */
+        uint32_t external_attr = 0;
+        /* access internal entry data safely */
+        struct mzip_entry *entry = &((struct mzip_entry*)za->entries)[i];
+        external_attr = entry->external_attr;
+        mode_t desired_mode = (mode_t)((external_attr >> 16) & 0777);
+        if (desired_mode == 0) desired_mode = 0644; /* fallback */
+
+        /* Open the output file atomically: try O_CREAT|O_EXCL first to avoid
+         * TOCTOU overwrite races. If it exists and force is requested, open with
+         * O_TRUNC to overwrite. Use low-level descriptors and write() to avoid
+         * stdio buffering issues. */
+        int fd = -1;
+        int open_flags = O_WRONLY | O_CREAT | O_EXCL;
+        fd = open(fname_sanitized, open_flags, desired_mode);
+        if (fd < 0) {
+            if (errno == EEXIST) {
+                if (!g_force) {
+                    fprintf(stderr, "Skipping existing file (use -f to overwrite): %s\n", fname_sanitized);
+                    zip_fclose(zf);
+                    continue;
+                }
+                /* Force path: open for write/truncate but ensure it's not a symlink */
+                if (lstat(fname_sanitized, &pst) == 0 && S_ISLNK(pst.st_mode) && g_extract_policy == POLICY_REJECT) {
+                    fprintf(stderr, "Refusing to overwrite symlink: %s\n", fname_sanitized);
+                    zip_fclose(zf);
+                    continue;
+                }
+                fd = open(fname_sanitized, O_WRONLY | O_TRUNC);
+                if (fd < 0) {
+                    fprintf(stderr, "Cannot open for overwrite %s: %s\n", fname_sanitized, strerror(errno));
+                    zip_fclose(zf);
+                    continue;
+                }
+            } else {
+                fprintf(stderr, "Cannot create %s: %s\n", fname_sanitized, strerror(errno));
+                zip_fclose(zf);
+                continue;
+            }
+        }
+
+        /* After creating/opening, ensure we didn't follow a symlink to a special file. */
+        struct stat st2;
+        if (fstat(fd, &st2) != 0) {
+            fprintf(stderr, "Failed to stat %s\n", fname_sanitized);
+            close(fd);
+            zip_fclose(zf);
+            continue;
+        }
+        if (!S_ISREG(st2.st_mode)) {
+            fprintf(stderr, "Refusing to write non-regular file %s\n", fname_sanitized);
+            close(fd);
             zip_fclose(zf);
             continue;
         }
 
-        /* Write data and add proper termination for text files */
-        fwrite(zf->data, 1, zf->size, out);
-        fclose(out);
+        /* Apply safe permissions (masking out SUID/SGID/sticky by using 0777 mask) */
+        if (fchmod(fd, desired_mode & 0777) != 0) {
+            /* Non-fatal: warn but continue */
+            fprintf(stderr, "Warning: failed to set permissions on %s: %s\n", fname_sanitized, strerror(errno));
+        }
+
+        /* Write the file content */
+        ssize_t wrote = 0;
+        const uint8_t *data = (const uint8_t*)zf->data;
+        size_t remain = zf->size;
+        while (remain > 0) {
+            ssize_t n = write(fd, data + wrote, remain);
+            if (n < 0) {
+                if (errno == EINTR) continue;
+                fprintf(stderr, "Write error for %s: %s\n", fname_sanitized, strerror(errno));
+                break;
+            }
+            wrote += n;
+            remain -= n;
+        }
+        close(fd);
+
         /* Save size before closing – zip_fclose() frees the zip_file_t */
         size_t entry_size = (size_t)zf->size;
         zip_fclose(zf);
-        printf("Extracted %s (%zu bytes)\n", fname_sanitized, entry_size);
+        if (remain == 0) {
+            printf("Extracted %s (%zu bytes)\n", fname_sanitized, entry_size);
+        } else {
+            fprintf(stderr, "Failed to fully write %s\n", fname_sanitized);
+        }
     }
 
     zip_close(za);
@@ -470,13 +595,20 @@ int main(int argc, char **argv) {
 		}
 	}
 
-	/* Parse CRC verification option: --verify-crc */
-	for (i = 3; i < argc; i++) {
-		if (strcmp(argv[i], "--verify-crc") == 0) {
-			/* enable strict CRC verification in the mzip backend */
-			mzip_verify_crc = 1;
-		}
-	}
+    /* Parse CRC verification option: --verify-crc */
+    for (i = 3; i < argc; i++) {
+        if (strcmp(argv[i], "--verify-crc") == 0) {
+            /* enable strict CRC verification in the mzip backend */
+            mzip_verify_crc = 1;
+        }
+    }
+
+    /* Parse force option: -f or --force (allow overwriting existing files) */
+    for (i = 3; i < argc; i++) {
+        if (strcmp(argv[i], "-f") == 0 || strcmp(argv[i], "--force") == 0) {
+            g_force = 1;
+        }
+    }
 
 	if (mode_list) {
 		if (argc < 3) {
